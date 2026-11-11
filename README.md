@@ -59,6 +59,19 @@ I built WordFarm solo: product, design, a Spring Boot backend, a React web app, 
 
 ## Engineering highlights
 
+- **Fixed a scheduler that could only go down.** Found that the SM-2 grade mapping made "mastered" unreachable (0 of 109 cards), then recalibrated every grade step to one ~84% target recall rate.
+- **Offline-safe mobile answers.** Ratings are saved on the device before the next card appears, and deliberately sent at most once, because a resent answer would corrupt the card's schedule.
+- **An API contract for apps that can't be redeployed.** The OpenAPI spec is generated from the server, CI blocks drift and breaking changes, and TypeScript, Kotlin and Swift code is generated from it on every build.
+- **AI cost control.** Usage is metered per AI judgment, each task gets its own model, and a schema the API enforces replaced a regex parser that silently saved corrupt cards.
+- **An evaluation harness for the AI grader.** A model must grade a set of trap answers with zero false passes before its grades can affect scheduling.
+- **Production reliability.** Found that a JVM out of memory would never be restarted by the platform, and that the restart alert could never fire. Fixed both.
+- **Word identity.** Every card is linked to a dictionary entry by one deterministic resolver, across all seven ways a card can be created.
+- **Shared audio.** Text-to-speech files are stored under a content hash, so users share files and synthesis calls. The hash is kept identical in Java and Python by shared test vectors.
+- **A data pipeline with built-in checks.** Python steps run in dependency order, and each one has an integrity check that stops the run if it fails.
+
+<details>
+<summary><b>Read the deep dives</b></summary>
+
 ### Finding and fixing a scheduler that could only go down
 Every card carries an "ease" estimate: the higher it is, the longer until the card comes back. It starts at 2.50. Under the original SM-2 grade mapping, the four answer buttons moved it like this:
 
@@ -110,6 +123,8 @@ All content is loaded by a Python pipeline: dictionaries, HSK/JLPT/TOPIK vocabul
 
 ### Caching that never under-reports
 The web app caches by how often data changes: never-changing content, slow-changing user data, fast-changing values like due counts and quota, and live study sessions (never cached). Screens like "all caught up" or "out of AI answers" only appear when the data behind them is fresh, and the server's answer always has the final say.
+
+</details>
 
 ---
 
