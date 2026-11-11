@@ -16,7 +16,7 @@ I built WordFarm solo: product, design, a Spring Boot backend, a React web app, 
 
 **Study**
 - Ready-made decks for **HSK 1–6** (Chinese), **JLPT N5–N1** (Japanese) and **TOPIK** (Korean), plus your own decks
-- **Recognition** mode (reveal and self-rate) or **typing** mode, which the server grades with fuzzy matching
+- **Recognition** mode (reveal and self-rate) or **typing** mode, graded on the server: Damerau–Levenshtein distance for terms and token-set similarity for meanings, adjusted for hints and answer speed
 - Sessions never run dry: due cards first, then new cards, then early reviews, then your weakest cards
 - A hands-free **listening** mode that plays a deck as audio without touching your review schedule
 
@@ -59,8 +59,24 @@ I built WordFarm solo: product, design, a Spring Boot backend, a React web app, 
 
 ## Engineering highlights
 
-### A scheduler that can actually say "mastered"
-Scheduling is based on SM-2, but I replaced its grade-to-ease formula. Under standard SM-2, the neutral point sat below the answer users press most often, so ease could only fall and "mastered" was unreachable. In WordFarm, each pair of adjacent grade steps encodes an explicit **target recall rate**, so changing a step means stating the recall rate it implies. All of this lives in config, and an answer with no rating is rejected rather than defaulted.
+### Finding and fixing a scheduler that could only go down
+Every card carries an "ease" estimate: the higher it is, the longer until the card comes back. It starts at 2.50. Under the original SM-2 grade mapping, the four answer buttons moved it like this:
+
+| Button | Before | After |
+|---|---|---|
+| No idea | −0.54 | −0.54 |
+| Not quite | −0.32 | −0.32 |
+| **Got it** (the most-pressed) | **±0.00** | **+0.06** |
+| Knew it | +0.10 | +0.10 |
+
+The neutral point sat under the button people press most, so for anyone recalling less than 100% of the time, ease could only fall. Every "mastered" check required ease above 2.5, the value a card starts with, which made mastery unreachable. On the development data, **0 of 109 cards** were Known or Mastered.
+
+The fix treats each pair of adjacent steps as a **target recall rate**: ease stops moving when `p · up = (1 − p) · down`. The "Knew it"/"No idea" pair already settled at 0.54 / 0.64 = **84.4%**, a standard spaced-repetition target. I gave "Got it" the one increment (+0.06) that brings the "Not quite" pair to the same target (0.32 / 0.38 ≈ 84%), so the whole scale aims at one recall rate. I also added bounds an estimate needs once it can rise: ease is clamped to [1.30, 2.70] and intervals are capped at 365 days. The deltas live in config, and the code documents that changing a step without stating the recall rate it implies is a defect.
+
+### Offline-safe answers on mobile, deliberately sent at most once
+In the iOS and Android study players, a rating is written to SQLite (GRDB on iOS, Room on Android) **before** the next card appears, and the network never blocks the next card. Rows are keyed by `(session, card)`, so a double tap stores one answer, not two. The queue drains in the background and survives the app being killed.
+
+The interesting decision is **at-most-once delivery**. The server has no idempotency key yet, and resending an answer would apply SM-2 twice and corrupt the card's interval. Dropping an answer only leaves the card due, which the next session fixes on its own. So the client retries only errors that prove the request never left the device (no connection, host unreachable, DNS failure). Timeouts and dropped connections count as unknown and are discarded on purpose. The prefetch depth (five cards ahead, refilled at two) is also treated as a correctness setting, not a performance one: the server marks cards shown when they're delivered, so every unanswered prefetched card is a card lost from the day.
 
 ### An API contract that protects apps already installed on phones
 The web app ships with the server, but a mobile build stays on a phone for months. So:
@@ -70,10 +86,18 @@ The web app ships with the server, but a mobile build stays on a phone for month
 - The endpoints mobile apps rely on are listed in a file, and tests enforce typed schemas, required fields and stable operation IDs for each one.
 
 ### AI that's useful without being expensive
-- **Usage is metered per AI judgment, not per model call.** Grading a translation or explaining a sentence counts against a daily quota. Generating practice items and grading fill-in-the-blank locally don't.
-- **Each task gets its own model.** Paid-for judgments run on a stronger model, and background generation runs on a cheaper one.
-- **The translation grader is checked by an evaluation harness** before it's allowed to affect scheduling.
+- **Usage is metered per AI judgment, not per model call.** Actions where the AI evaluates or explains something for the learner count against a daily quota.
+- **Each task gets its own model.** Metered judgments run on a stronger model, and background generation runs on a cheaper one.
+- **The API enforces output structure, not the prompt.** Deck generation used to ask for `term | definition | pronunciation` lines and parse them with a regex. A `|` inside a definition shifted every later field, and the card saved wrong without any error. Generation now declares a JSON schema the API enforces, and the regex and three hand-written cleanup routines are deleted rather than kept as a fallback. A sanitiser still checks meaning, since a valid structure doesn't guarantee valid content.
 - **Reading passages have a difficulty guardrail.** Each generated passage is split into words and compared with what the learner knows. If too many words are unknown, it's regenerated once before being served.
+
+### An evaluation harness for the AI grader
+The grader is not trusted on how it seems in use. A **hand-labelled set of trap cases** covers correct answers, natural paraphrases, and answers that are almost right but wrong. The harness runs each candidate model against that set and reports two things: agreement with the reference verdicts, and **inflation false positives** (wrong answers graded as correct). A model passes only with **zero** inflation false positives and agreement at or above the bar. If no model passes, the run fails and points at the prompt. This check is the precondition for letting AI-graded answers affect scheduling.
+
+### Production reliability: an outage the platform would never have ended
+While investigating high memory use on the JVM backend, I found that the platform's configured health check was a **readiness** probe, not a **liveness** probe. A JVM that ran out of heap and kept limping would stop receiving traffic, but would **never be restarted**: an outage that lasts until a human notices. I added `-XX:+ExitOnOutOfMemoryError`, which turns that into a crash the platform does restart, at a known cost of about 2 minutes (startup was measured at 110 s).
+
+The restart alert had the same kind of bug. It fired at more than 3 restarts in 5 minutes, but at a 110 s startup a crash loop can only manage about 2, so the alert could never fire. It now triggers on any restart.
 
 ### Knowing which words a learner actually knows
 Every card is linked to a dictionary entry when it's created, through all seven creation paths (editor, import, AI generation and so on), by one deterministic resolver. A word the user set by hand is never overwritten by the machine. Words with several pronunciations stay separate. Phrase and sentence cards deliberately give no credit for knowing individual words. This feeds reading highlights, duplicate detection and the "known words" count.
